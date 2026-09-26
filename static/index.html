@@ -1,1 +1,60 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>工伤事故调查与纠正措施</title><style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#17212b}pre{background:#f4f7f9;padding:1rem;overflow:auto}button{padding:.55rem 1rem}</style></head><body><h1>工伤事故调查与纠正措施</h1><p>记录工伤经过、伤害、现场和证人，维护调查、纠正措施、验证与关闭流程</p><p>严重度越高、伤害指数越大或未关闭措施越多，优先级越高；严重事故必须在4小时内启动调查。</p><button onclick="loadItems()">刷新列表</button><pre id="out">使用X-Actor和X-Role请求头调用接口。</pre><script>async function loadItems(){const r=await fetch('/api/items',{headers:{'X-Actor':'demo','X-Role':'viewer'}});document.getElementById('out').textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>工伤事故调查与纠正措施 · 整改待验收台账</title><style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1080px;margin:2rem auto;padding:0 1rem;color:#17212b;background:#fafbfc}
+h1{font-size:1.4rem}.muted{color:#5b6b7a;font-size:.9rem}
+table{border-collapse:collapse;width:100%;background:#fff;font-size:.88rem}
+th,td{border:1px solid #dde3ea;padding:.5rem .6rem;text-align:left;vertical-align:top}
+th{background:#f1f4f7}
+.badge{display:inline-block;padding:.1rem .5rem;border-radius:10px;font-size:.75rem;font-weight:600}
+.b-overdue{background:#fdeaea;color:#b3261e}.b-block{background:#fff4e0;color:#9a5a00}
+.b-ok{background:#e6f4ea;color:#1e6b33}.b-new{background:#e8eefc;color:#1a4db3}
+pre{background:#f4f7f9;padding:1rem;overflow:auto;font-size:.78rem}
+button{padding:.5rem 1rem;margin:.2rem .2rem .2rem 0}
+section{background:#fff;border:1px solid #dde3ea;border-radius:8px;padding:1rem;margin:1rem 0}
+</style></head><body>
+<h1>工伤事故调查与纠正措施 · 整改待验收台账</h1>
+<p class="muted">登记责任人/到期时间/现场证据；逾期自动抬高事故优先级并标红。安全员不能验收本人提交的整改，证据缺失或事故关键信息改过将被退回；进入验证前必须持有当前版本下的有效验收。</p>
+<button onclick="loadItems()">刷新事故列表</button>
+<section id="listSection"><h3>事故列表</h3><div id="list"></div></section>
+<section id="detailSection" hidden><h3>事故详情与整改台账</h3><div id="detail"></div></section>
+<section><h3>原始JSON</h3><pre id="out">点击"刷新事故列表"开始。</pre></section>
+<script>
+const STATUS={reported:'登记',investigating:'调查中',corrective_action:'整改中',verification:'验证中',closed:'已关档'};
+const RSTATUS={pending:'待提交',submitted:'待验收',accepted:'验收通过',returned:'已退回'};
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+async function api(path,opt={}){
+  opt.headers=Object.assign({'X-Actor':'demo','X-Role':'safety_manager','Content-Type':'application/json'},opt.headers);
+  const r=await fetch(path,opt); const j=await r.json();
+  if(!r.ok) throw new Error((j&&j.message)||r.status); return j;
+}
+async function loadItems(){
+  try{
+    const j=await api('/api/items'); document.getElementById('out').textContent=JSON.stringify(j,null,2);
+    const rows=j.items.map(it=>`<tr>
+      <td>${it.id}</td><td>${esc(it.title)}</td><td>${STATUS[it.status]||it.status}</td>
+      <td>P${it.priority}${it.overdue?' <span class="badge b-overdue">整改逾期</span>':''}${it.blocked?' <span class="badge b-block">验收阻断</span>':''}</td>
+      <td>${it.rectification_count} 条 / 逾期 ${it.rectification_overdue_count}</td>
+      <td>${it.block_reasons&&it.block_reasons.length?it.block_reasons.map(b=>esc(b.reason)).join('；'):'—'}</td>
+      <td>${it.latest_return_note?esc(it.latest_return_note.note):'—'}</td>
+      <td><button onclick="loadDetail(${it.id})">台账</button></td></tr>`).join('');
+    document.getElementById('list').innerHTML=`<table><tr><th>ID</th><th>标题</th><th>状态</th><th>优先级</th><th>整改</th><th>阻断原因</th><th>最近退回说明</th><th></th></tr>${rows}</table>`;
+  }catch(e){document.getElementById('out').textContent='错误：'+e.message;}
+}
+async function loadDetail(id){
+  try{
+    const it=await api('/api/items/'+id);
+    const rects=(it.rectifications||[]).map(r=>`<tr>
+      <td>${r.id}</td><td>${esc(r.owner)}</td><td>${esc(r.due_at)}</td>
+      <td>${r.evidence?esc(r.evidence):'<span class="badge b-block">证据缺失</span>'}</td>
+      <td><span class="badge ${r.status==='accepted'&&r.acceptance_current?'b-ok':r.status==='returned'?'b-overdue':'b-new'}">${RSTATUS[r.status]||r.status}</span>${r.overdue?' <span class="badge b-overdue">逾期</span>':''}${r.status==='accepted'&&!r.acceptance_current?' <span class="badge b-block">版本失效</span>':''}</td>
+      <td>${esc(r.submitted_by||'')}${r.accepted_by?' / 验收:'+esc(r.accepted_by)+'@v'+r.accepted_version:''}</td>
+      <td>${r.last_return_note?esc(r.last_return_note):'—'}</td></tr>`).join('');
+    const blockers=(it.block_reasons||[]).map(b=>`<li>${esc(b.reason)}</li>`).join('')||'<li>无阻断</li>';
+    document.getElementById('detailSection').hidden=false;
+    document.getElementById('detail').innerHTML=`
+      <p><b>#${it.id} ${esc(it.title)}</b> · ${STATUS[it.status]||it.status} · 版本 v${it.version} · 优先级 P${it.priority}${it.overdue?' <span class="badge b-overdue">整改逾期</span>':''}</p>
+      <p><b>阻断原因：</b><ul>${blockers}</ul></p>
+      <p><b>最近退回说明：</b>${it.latest_return_note?esc(it.latest_return_note.note)+'（'+esc(it.latest_return_note.returned_by)+' '+esc(it.latest_return_note.returned_at)+'）':'—'}</p>
+      <table><tr><th>ID</th><th>责任人</th><th>到期</th><th>现场证据</th><th>状态</th><th>提交/验收</th><th>退回说明</th></tr>${rects||'<tr><td colspan=7>暂无整改</td></tr>'}</table>`;
+  }catch(e){document.getElementById('out').textContent='错误：'+e.message;}
+}
+</script></body></html>

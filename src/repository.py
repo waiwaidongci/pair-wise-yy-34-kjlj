@@ -54,6 +54,28 @@ class Repository:
                     created_at TEXT NOT NULL,
                     UNIQUE(item_id, external_ref)
                 );
+                CREATE TABLE IF NOT EXISTS rectifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                    owner TEXT NOT NULL,
+                    due_at TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    evidence TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(status IN ('pending','submitted','accepted','returned')),
+                    submitted_by TEXT,
+                    submitted_at TEXT,
+                    submitted_version INTEGER,
+                    accepted_by TEXT,
+                    accepted_at TEXT,
+                    accepted_version INTEGER,
+                    last_return_note TEXT,
+                    returned_by TEXT,
+                    returned_at TEXT,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS audit_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     action TEXT NOT NULL,
@@ -156,6 +178,88 @@ class Repository:
                 (item_id,),
             ).fetchone()
         return int(row["n"])
+
+    def update_item_fields(self, item_id: int, fields: Dict[str, Any],
+                           expected_version: int, actor: str) -> Dict[str, Any]:
+        allowed = ("title", "description", "severity", "quantity", "threshold")
+        sets, params = [], []
+        for key in allowed:
+            if key in fields:
+                sets.append(f"{key}=?")
+                params.append(fields[key])
+        if not sets:
+            return self.get_item(item_id)
+        now = utc_now()
+        sets.append("version=version+1")
+        sets.append("updated_at=?")
+        params.extend([now, item_id, expected_version])
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                f"UPDATE items SET {', '.join(sets)} WHERE id=? AND version=?",
+                tuple(params),
+            )
+            if cur.rowcount == 0:
+                exists = self.conn.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone()
+                if exists is None:
+                    raise NotFoundError("项目不存在")
+                raise ConflictError("版本冲突，请刷新后重试")
+        return self.get_item(item_id)
+
+    def add_rectification(self, item_id: int, owner: str, due_at: str,
+                          detail: str, evidence: Optional[str],
+                          actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """INSERT INTO rectifications(item_id, owner, due_at, detail, evidence,
+                   status, created_by, created_at, updated_at)
+                   VALUES(?,?,?,?,?,'pending',?,?,?)""",
+                (item_id, owner, due_at, detail, evidence, actor, now, now),
+            )
+            rect_id = int(cur.lastrowid)
+        return self.get_rectification(rect_id)
+
+    def get_rectification(self, rect_id: int) -> Dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM rectifications WHERE id=?", (rect_id,)
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("整改不存在")
+        return dict(row)
+
+    def list_rectifications(self, item_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM rectifications"
+        params: tuple = ()
+        if item_id is not None:
+            sql += " WHERE item_id=?"
+            params = (item_id,)
+        sql += " ORDER BY id"
+        with self._lock:
+            rows = self.conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_rectification(self, rect_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
+        cols = ("owner", "due_at", "detail", "evidence", "status", "submitted_by",
+                "submitted_at", "submitted_version", "accepted_by", "accepted_at",
+                "accepted_version", "last_return_note", "returned_by", "returned_at")
+        sets, params = [], []
+        for key, value in fields.items():
+            if key in cols:
+                sets.append(f"{key}=?")
+                params.append(value)
+        if not sets:
+            return self.get_rectification(rect_id)
+        sets.append("updated_at=?")
+        params.extend([utc_now(), rect_id])
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                f"UPDATE rectifications SET {', '.join(sets)} WHERE id=?",
+                tuple(params),
+            )
+            if cur.rowcount == 0:
+                raise NotFoundError("整改不存在")
+        return self.get_rectification(rect_id)
 
     def append_audit(self, action: str, entity_type: str, entity_id: int,
                      actor: str, detail: dict) -> Dict[str, Any]:

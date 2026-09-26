@@ -89,6 +89,12 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"records": service.list_records(item_id, role)})
+                elif path.startswith("/api/items/") and path.endswith("/rectifications"):
+                    item_id = int(path.split("/")[3])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {
+                        "rectifications": service.list_rectifications(item_id, role)})
                 elif path.startswith("/api/items/"):
                     item_id = int(path.rsplit("/", 1)[-1])
                     actor, role = self._identity()
@@ -98,6 +104,19 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"events": service.audit(role)})
+                else:
+                    self._json(404, {"error": "not_found"})
+            except Exception as exc:
+                self._send_error(exc)
+
+        def do_PATCH(self) -> None:
+            try:
+                path = urlparse(self.path).path
+                actor, role = self._identity()
+                body = self._body()
+                if path.startswith("/api/items/"):
+                    item_id = int(path.rsplit("/", 1)[-1])
+                    self._json(200, service.update_item(item_id, body, actor, role))
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:
@@ -113,6 +132,25 @@ def make_handler(service: Service, static_dir: str):
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     self._json(201, service.add_record(item_id, body, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/rectifications"):
+                    item_id = int(path.split("/")[3])
+                    self._json(201, service.register_rectification(
+                        item_id, body, actor, role))
+                elif "/rectifications/" in path and path.endswith("/submit"):
+                    parts = path.split("/")
+                    item_id, rect_id = int(parts[3]), int(parts[5])
+                    self._json(200, service.submit_rectification(
+                        item_id, rect_id, body, actor, role))
+                elif "/rectifications/" in path and path.endswith("/accept"):
+                    parts = path.split("/")
+                    item_id, rect_id = int(parts[3]), int(parts[5])
+                    self._json(200, service.accept_rectification(
+                        item_id, rect_id, body, actor, role))
+                elif "/rectifications/" in path and path.endswith("/return"):
+                    parts = path.split("/")
+                    item_id, rect_id = int(parts[3]), int(parts[5])
+                    self._json(200, service.return_rectification(
+                        item_id, rect_id, body, actor, role))
                 elif path.startswith("/api/items/") and path.endswith("/transition"):
                     item_id = int(path.split("/")[3])
                     target = body.get("target")

@@ -1,8 +1,15 @@
 import tempfile, unittest
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from src.repository import Repository
 from src.service import Service
 from src.rules import STATES, TRANSITION_ROLES
+
+
+def iso(offset_hours):
+    return (datetime.now(timezone.utc) + timedelta(hours=offset_hours)).replace(microsecond=0).isoformat()
+
+
 class WorkflowTest(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.repo=Repository(str(Path(self.tmp.name)/"test.db")); self.service=Service(self.repo)
@@ -12,9 +19,14 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(item["status"],STATES[0])
         self.service.add_record(item["id"],{"kind":"evidence","detail":"evidence registered","status":"closed","external_ref":"EV-1"},"recorder",'investigator')
         current=item
-        for target in STATES[1:]:
+        for index,target in enumerate(STATES[1:]):
+            if target=="verification":
+                rect=self.service.register_rectification(current["id"],{"owner":"张三","due_at":iso(48),"detail":"更换防护装置"},"inv",'investigator')
+                self.service.submit_rectification(current["id"],rect["id"],{"evidence":"现场照片IMG-1"},"inv",'investigator')
+                self.service.accept_rectification(current["id"],rect["id"],{},"sm",'safety_manager')
+                current=self.service.get_item(current["id"],"viewer")
             current=self.service.transition(current["id"],target,current["version"],"reviewer",TRANSITION_ROLES[target][0])
         self.assertEqual(current["status"],STATES[-1])
         self.assertEqual(len(self.service.list_records(current["id"],"viewer")),1)
-        events=self.service.audit("viewer",current["id"]); self.assertGreaterEqual(len(events),len(STATES)+1); self.assertTrue(self.repo.verify_audit_chain())
+        events=self.service.audit("viewer",current["id"]); self.assertGreaterEqual(len(events),len(STATES)+4); self.assertTrue(self.repo.verify_audit_chain())
 if __name__=="__main__": unittest.main()

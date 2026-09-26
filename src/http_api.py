@@ -108,17 +108,36 @@ def make_handler(service: Service, static_dir: str):
                 path = urlparse(self.path).path
                 actor, role = self._identity()
                 body = self._body()
+                segments = [s for s in path.split("/") if s]
                 if path == "/api/items":
                     self._json(201, service.create_item(body, actor, role))
-                elif path.startswith("/api/items/") and path.endswith("/records"):
-                    item_id = int(path.split("/")[3])
-                    self._json(201, service.add_record(item_id, body, actor, role))
-                elif path.startswith("/api/items/") and path.endswith("/transition"):
-                    item_id = int(path.split("/")[3])
-                    target = body.get("target")
-                    expected = body.get("expected_version")
-                    self._json(200, service.transition(
-                        item_id, target, expected, actor, role))
+                elif len(segments) >= 3 and segments[:2] == ["api", "items"]:
+                    item_id = int(segments[2])
+                    if len(segments) == 4 and segments[3] == "records":
+                        self._json(201, service.add_record(item_id, body, actor, role))
+                    elif len(segments) == 4 and segments[3] == "transition":
+                        self._json(200, service.transition(
+                            item_id, body.get("target"),
+                            body.get("expected_version"), actor, role))
+                    elif len(segments) == 4 and segments[3] == "update":
+                        self._json(200, service.update_item(
+                            item_id, body, body.get("expected_version"), actor, role))
+                    elif len(segments) == 6 and segments[3] == "records":
+                        record_id = int(segments[4])
+                        action = segments[5]
+                        if action == "accept":
+                            self._json(200, service.accept_record(
+                                item_id, record_id, actor, role))
+                        elif action == "return":
+                            self._json(200, service.return_record(
+                                item_id, record_id, body, actor, role))
+                        elif action == "resubmit":
+                            self._json(200, service.resubmit_record(
+                                item_id, record_id, body, actor, role))
+                        else:
+                            self._json(404, {"error": "not_found"})
+                    else:
+                        self._json(404, {"error": "not_found"})
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:

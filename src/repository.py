@@ -35,6 +35,7 @@ class Repository:
                     threshold REAL NOT NULL DEFAULT 1,
                     status TEXT NOT NULL CHECK(status IN ({statuses})),
                     version INTEGER NOT NULL DEFAULT 1,
+                    key_version INTEGER NOT NULL DEFAULT 1,
                     external_ref TEXT,
                     created_by TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -52,6 +53,17 @@ class Repository:
                     external_ref TEXT,
                     created_by TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    assignee TEXT,
+                    due_at TEXT,
+                    evidence TEXT,
+                    acceptance_status TEXT,
+                    submitted_key_version INTEGER,
+                    accepted_by TEXT,
+                    accepted_at TEXT,
+                    accepted_key_version INTEGER,
+                    last_return_reason TEXT,
+                    last_returned_by TEXT,
+                    last_returned_at TEXT,
                     UNIQUE(item_id, external_ref)
                 );
                 CREATE TABLE IF NOT EXISTS audit_events (
@@ -66,6 +78,20 @@ class Repository:
                     created_at TEXT NOT NULL
                 );
             """)
+            self._ensure_column("items", "key_version",
+                                "key_version INTEGER NOT NULL DEFAULT 1")
+            for ddl in ("assignee TEXT", "due_at TEXT", "evidence TEXT",
+                        "acceptance_status TEXT", "submitted_key_version INTEGER",
+                        "accepted_by TEXT", "accepted_at TEXT",
+                        "accepted_key_version INTEGER", "last_return_reason TEXT",
+                        "last_returned_by TEXT", "last_returned_at TEXT"):
+                self._ensure_column("records", ddl.split()[0], ddl)
+
+    def _ensure_column(self, table: str, column: str, ddl: str) -> None:
+        columns = {row["name"] for row in
+                   self.conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
     @staticmethod
     def _item(row: sqlite3.Row) -> Dict[str, Any]:
@@ -123,23 +149,101 @@ class Repository:
                 raise ConflictError("版本冲突，请刷新后重试")
         return self.get_item(item_id)
 
+    def update_item(self, item_id: int, title: str, description: str, severity: str,
+                    quantity: float, threshold: float,
+                    expected_version: int) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE items SET title=?, description=?, severity=?, quantity=?,
+                   threshold=?, version=version+1, key_version=key_version+1, updated_at=?
+                   WHERE id=? AND version=?""",
+                (title, description, severity, quantity, threshold, now,
+                 item_id, expected_version),
+            )
+            if cur.rowcount == 0:
+                exists = self.conn.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone()
+                if exists is None:
+                    raise NotFoundError("项目不存在")
+                raise ConflictError("版本冲突，请刷新后重试")
+        return self.get_item(item_id)
+
     def add_record(self, item_id: int, kind: str, detail: str, status: str,
-                   external_ref: Optional[str], actor: str) -> Dict[str, Any]:
+                   external_ref: Optional[str], actor: str,
+                   ledger: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         now = utc_now()
         self.get_item(item_id)
+        ledger = ledger or {}
         try:
             with self._lock, self.conn:
                 cur = self.conn.execute(
                     """INSERT INTO records(item_id, kind, detail, status, external_ref,
-                       created_by, created_at) VALUES(?,?,?,?,?,?,?)""",
-                    (item_id, kind, detail, status, external_ref, actor, now),
+                       created_by, created_at, assignee, due_at, evidence,
+                       acceptance_status, submitted_key_version)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (item_id, kind, detail, status, external_ref, actor, now,
+                     ledger.get("assignee"), ledger.get("due_at"), ledger.get("evidence"),
+                     ledger.get("acceptance_status"), ledger.get("submitted_key_version")),
                 )
                 record_id = int(cur.lastrowid)
         except sqlite3.IntegrityError as exc:
             raise ConflictError("记录唯一标识已存在") from exc
+        return self.get_record(item_id, record_id)
+
+    def get_record(self, item_id: int, record_id: int) -> Dict[str, Any]:
         with self._lock:
-            row = self.conn.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
+            row = self.conn.execute(
+                "SELECT * FROM records WHERE id=? AND item_id=?", (record_id, item_id)
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("记录不存在")
         return dict(row)
+
+    def set_record_accepted(self, item_id: int, record_id: int, actor: str,
+                            key_version: int) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE records SET acceptance_status='accepted', accepted_by=?,
+                   accepted_at=?, accepted_key_version=?, status='closed'
+                   WHERE id=? AND item_id=?""",
+                (actor, now, key_version, record_id, item_id),
+            )
+            if cur.rowcount == 0:
+                raise NotFoundError("记录不存在")
+        return self.get_record(item_id, record_id)
+
+    def set_record_returned(self, item_id: int, record_id: int, reason: str,
+                            actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE records SET acceptance_status='returned', last_return_reason=?,
+                   last_returned_by=?, last_returned_at=?, status='open'
+                   WHERE id=? AND item_id=?""",
+                (reason, actor, now, record_id, item_id),
+            )
+            if cur.rowcount == 0:
+                raise NotFoundError("记录不存在")
+        return self.get_record(item_id, record_id)
+
+    def resubmit_record(self, item_id: int, record_id: int,
+                        updates: Dict[str, Any], key_version: int) -> Dict[str, Any]:
+        assignments = ["acceptance_status='pending'", "submitted_key_version=?",
+                       "accepted_by=NULL", "accepted_at=NULL",
+                       "accepted_key_version=NULL", "status='closed'"]
+        params: list = [key_version]
+        for column in ("detail", "assignee", "due_at", "evidence"):
+            if column in updates:
+                assignments.append(f"{column}=?")
+                params.append(updates[column])
+        params.extend([record_id, item_id])
+        sql = f"UPDATE records SET {', '.join(assignments)} WHERE id=? AND item_id=?"
+        with self._lock, self.conn:
+            cur = self.conn.execute(sql, params)
+            if cur.rowcount == 0:
+                raise NotFoundError("记录不存在")
+        return self.get_record(item_id, record_id)
 
     def list_records(self, item_id: int) -> List[Dict[str, Any]]:
         self.get_item(item_id)
